@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"log/slog"
-	"net/http"
 	"os"
 	"time" // New import
 
@@ -15,6 +13,7 @@ import (
 
 	_ "github.com/lib/pq"
 	"movie-organizer.steftech.com/internal/data"
+	"movie-organizer.steftech.com/internal/jsonlog"
 )
 
 const connStr = "host=localhost port=5432 user=root_user password=root_password dbname=default_db sslmode=disable"
@@ -30,10 +29,15 @@ type config struct {
 		maxIdleConns int
 		maxIdleTime  string
 	}
+	limiter struct {
+		rps     float64
+		burst   int
+		enabled bool
+	}
 }
 type application struct {
 	config config
-	logger *slog.Logger
+	logger *jsonlog.Logger
 	models data.Models
 }
 
@@ -49,13 +53,19 @@ func main() {
 	flag.IntVar(&cfg.db.maxIdleConns, "db-max-idle-conns", 25, "PostgreSQL max idle connections")
 	flag.StringVar(&cfg.db.maxIdleTime, "db-max-idle-time", "15m", "PostgreSQL max connection idle time")
 
+	// Create command line flags to read the setting values into the config struct.
+	// Notice that we use true as the default for the 'enabled' setting?
+	flag.Float64Var(&cfg.limiter.rps, "limiter-rps", 2, "Rate limiter maximum requests per second")
+	flag.IntVar(&cfg.limiter.burst, "limiter-burst", 4, "Rate limiter maximum burst")
+	flag.BoolVar(&cfg.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
+
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := jsonlog.New(os.Stdout, jsonlog.LevelInfo)
 
 	db, err := openDB(cfg)
 	if err != nil {
-		logger.Error("database connection failed", "error", err)
+		logger.PrintFatal(err, nil)
 		os.Exit(1)
 	}
 
@@ -71,19 +81,12 @@ func main() {
 		models: data.NewModels(db, false),
 	}
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.port),
-		Handler:      app.routes(),
-		IdleTimeout:  time.Minute,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	if err := app.serve(); err != nil {
+		app.logger.PrintFatal(err, nil)
+		// os.Exit(1)
 	}
-
-	logger.Info(fmt.Sprintf("starting %s server on %s", cfg.env, srv.Addr))
-	errFinal := srv.ListenAndServe()
-	logger.Error(errFinal.Error())
-	os.Exit(1)
+	// Use the PrintFatal() method to log the error and exit.
+	// logger.PrintFatal(err, nil)
 }
 
 // The openDB() function returns a sql.DB connection pool.
